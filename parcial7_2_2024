@@ -1,0 +1,100 @@
+-- LAROCCA, Lourdes Florencia
+-- Recuperatorio 1c2024gdd
+
+-- SQL | Nota: 9
+
+SELECT 
+    P.prod_codigo,
+    P.prod_detalle,
+	-- domicilio del deposito sin stock 
+    D.depo_domicilio AS domicilioDeposinStock,
+	-- cant de depositos con un stock superior al del punto de reposicion
+    (SELECT COUNT(*)
+		FROM Stock S2
+		WHERE S2.stoc_producto = P.prod_codigo
+			AND S2.stoc_cantidad > S2.stoc_punto_reposicion) AS cantDepositosConStockSuperiorReposicion
+FROM 
+    Producto P
+		INNER JOIN Stock S1 ON S1.stoc_producto = P.prod_codigo
+		INNER JOIN Deposito D ON S1.stoc_deposito = D.depo_codigo
+WHERE 
+	-- stock es nulo o 0
+    (S1.stoc_cantidad = 0 OR S1.stoc_cantidad IS NULL)
+    AND EXISTS (
+		-- posee stok mayor al puntp de reposicion
+        SELECT 1
+        FROM Stock S2
+        WHERE S2.stoc_producto = P.prod_codigo
+          AND S2.stoc_cantidad > S2.stoc_punto_reposicion
+    )
+ORDER BY 
+    P.prod_codigo;
+
+-- TSQL | Nota: 6
+-- Comentario: El trigger es sobre ITEM_FACTURA, al hacerlo sobre FACTURA todavía no entraron los items.
+
+CREATE TRIGGER trg_ControlPrecios ON Factura FOR INSERT, UPDATE
+AS
+BEGIN
+    DECLARE @Tipo CHAR(1), 
+			@Sucursal CHAR(4), 
+			@Numero CHAR(8), 
+			@Producto CHAR(8), 
+			@PrecioActual DECIMAL(12, 2), 
+			@Fecha SMALLDATETIME;
+    -- cursor para recorrer las facturas
+    DECLARE cur CURSOR FOR
+    SELECT I.fact_tipo, I.fact_sucursal, I.fact_numero, I.fact_fecha, IFact.item_producto, IFact.item_precio
+		FROM inserted I
+		JOIN Item_Factura IFact ON I.fact_numero+I.fact_sucursal+I.fact_tipo = IFact.item_numero+IFact.item_sucursal+IFact.item_tipo
+
+    OPEN cur;
+    FETCH NEXT FROM cur INTO @Tipo, @Sucursal, @Numero, @Fecha, @Producto, @PrecioActual;
+    WHILE @@FETCH_STATUS = 0
+    BEGIN
+        -- precio del mes anterior
+        DECLARE @PrecioMesAnterior DECIMAL(12, 2);
+        SELECT TOP 1 @PrecioMesAnterior = item_precio
+			FROM Factura F
+			JOIN Item_Factura I ON F.fact_numero+F.fact_sucursal+F.fact_tipo = I.item_numero+I.item_sucursal+I.item_tipo
+		WHERE I.item_producto = @Producto
+          AND F.fact_fecha >= DATEADD(MONTH, -1, @Fecha) 
+          AND F.fact_fecha < DATEADD(MONTH, 0, @Fecha)
+        ORDER BY F.fact_fecha DESC;
+
+        -- precio de hace 12 meses
+        DECLARE @PrecioHace12Meses DECIMAL(12, 2);
+        SELECT TOP 1 @PrecioHace12Meses = item_precio
+        FROM Factura F
+        JOIN Item_Factura I ON F.fact_tipo = I.item_tipo AND F.fact_sucursal = I.item_sucursal AND F.fact_numero = I.item_numero
+        WHERE I.item_producto = @Producto
+          AND F.fact_fecha >= DATEADD(MONTH, -12, @Fecha) 
+          AND F.fact_fecha < DATEADD(MONTH, -11, @Fecha)
+        ORDER BY F.fact_fecha DESC;
+
+        -- verificar las reglas de precio
+        IF (@PrecioMesAnterior IS NOT NULL AND @PrecioActual NOT BETWEEN @PrecioMesAnterior * 0.95 AND @PrecioMesAnterior * 1.05)
+        BEGIN
+			PRINT('Error: El precio de venta del producto o est  entre el 0% y 5% del precio de venta del mes anterior.')            
+			DELETE Item_Factura 
+            WHERE item_tipo + item_sucursal + item_numero = @Tipo + @Sucursal + @Numero
+            DELETE FROM Factura
+			WHERE fact_tipo + fact_sucursal + fact_numero = @Tipo + @Sucursal + @Numero
+        END
+
+        IF (@PrecioHace12Meses IS NOT NULL AND @PrecioActual > @PrecioHace12Meses * 1.5)
+        BEGIN
+            PRINT('Error: El precio de venta del producto excede el 50%% del precio de venta de hace 12 meses.');
+            DELETE Item_Factura 
+            WHERE item_tipo + item_sucursal + item_numero = @Tipo + @Sucursal + @Numero
+            DELETE FROM Factura
+			WHERE fact_tipo + fact_sucursal + fact_numero = @Tipo + @Sucursal + @Numero
+        END
+
+        FETCH NEXT FROM cur INTO @Tipo, @Sucursal, @Numero, @Fecha, @Producto, @PrecioActual;
+    END
+
+    CLOSE cur;
+    DEALLOCATE cur;
+
+END;
